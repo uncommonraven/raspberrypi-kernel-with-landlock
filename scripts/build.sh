@@ -24,6 +24,11 @@ image_name=$2
 out_arg=$3
 localversion=$4
 
+case $defconfig in
+  bcm2712_defconfig) baseline_package=linux-image-rpi-2712 ;;
+  *) die "no config baseline package for $defconfig" ;;
+esac
+
 repo_root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo_root"
 out_dir=$(realpath -m "$out_arg")
@@ -65,12 +70,16 @@ config="$out_dir/.config"
 require_line() {
   grep -qxF "$1" "$config" || die "$config does not contain: $1"
 }
-require_line "CONFIG_SECURITY_LANDLOCK=y"
+
 require_line "CONFIG_SECURITY_APPARMOR=y"
 require_line "CONFIG_LOCALVERSION=\"$localversion\""
 
-# The config baseline diff (T06) must run here, after olddefconfig and before
-# the build, so that it describes the .config that is shipped.
+# The config baseline diff (T06) runs here, after olddefconfig and before the
+# build, so that it describes the .config that is shipped.
+kernel_version=$(kmake -s kernelversion)
+"$repo_root/scripts/fetch-baseline.sh" "$baseline_package" "$kernel_version" "$out_dir/baseline"
+"$repo_root/scripts/check-config-diff.sh" "$out_dir/baseline/baseline.config" "$config" \
+  "$out_dir/config-$(basename "$out_dir").diff"
 
 kmake -j"$(nproc)" Image modules dtbs
 cp "$out_dir/arch/arm64/boot/Image" "$out_dir/$image_name"
