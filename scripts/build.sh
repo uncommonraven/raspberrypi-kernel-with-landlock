@@ -23,9 +23,16 @@ defconfig=$1
 image_name=$2
 out_arg=$3
 localversion=$4
+case $localversion in
+  *-landlock) ;;
+  *) die "localversion must end in -landlock (e.g. -v8-16k-landlock): $localversion" ;;
+esac
 
 case $defconfig in
-  bcm2712_defconfig) baseline_package=linux-image-rpi-2712 ;;
+  bcm2712_defconfig)
+    baseline_package=linux-image-rpi-2712
+    devices=("Raspberry Pi 5" "Raspberry Pi 500" "Raspberry Pi 500+" "Compute Module 5")
+    ;;
   *) die "no config baseline package for $defconfig" ;;
 esac
 
@@ -78,8 +85,9 @@ require_line "CONFIG_LOCALVERSION=\"$localversion\""
 # build, so that it describes the .config that is shipped.
 kernel_version=$(kmake -s kernelversion)
 "$repo_root/scripts/fetch-baseline.sh" "$baseline_package" "$kernel_version" "$out_dir/baseline"
+config_diff="$out_dir/config-$(basename "$out_dir").diff"
 "$repo_root/scripts/check-config-diff.sh" "$out_dir/baseline/baseline.config" "$config" \
-  "$out_dir/config-$(basename "$out_dir").diff"
+  "$config_diff"
 
 kmake -j"$(nproc)" Image modules dtbs
 cp "$out_dir/arch/arm64/boot/Image" "$out_dir/$image_name"
@@ -88,7 +96,20 @@ release=$(kmake -s kernelrelease)
 staging="$out_dir/modules-staging"
 rm -rf "$staging"
 kmake INSTALL_MOD_PATH="$staging" modules_install
+# Host-specific symlinks (e.g. build -> this checkout) would dangle on the device.
+find "$staging/lib/modules/$release" -maxdepth 1 -type l -delete
 tar -C "$staging/lib/modules/$release" --sort=name --owner=0 --group=0 --numeric-owner \
   -czf "$out_dir/modules.tar.gz" .
 
-echo "build: $image_name and modules.tar.gz (kernel $release) written to $out_dir"
+release_dir="$out_dir/release"
+rm -rf "$release_dir"
+mkdir -p "$release_dir"
+cp "$out_dir/$image_name" "$out_dir/modules.tar.gz" "$config" \
+  "$repo_root/kernel/config/landlock.config" "$repo_root/kernel/pins.env" \
+  "$config_diff" "$release_dir/"
+
+# Last: the manifest records the hashes of every file staged above.
+"$repo_root/scripts/write-manifest.sh" "$release_dir" "$image_name" "$defconfig" \
+  "$localversion" "$out_dir/baseline/baseline.provenance" "${devices[@]}"
+
+echo "build: $image_name, modules.tar.gz and manifest.json (kernel $release) staged in $release_dir"
