@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Build one target: fetch the pinned kernel source, merge the Landlock config
+# fragment, assert the resulting .config, then build Image and modules.
+#
+# Usage: scripts/build.sh <defconfig> <image-name> <out-dir> <localversion>
+#   defconfig     defconfig name, e.g. bcm2712_defconfig
+#   image-name    kernel image name in the release, e.g. kernel_2712.img
+#   out-dir       build output directory, relative to the repo root,
+#                 e.g. build/bcm2712
+#   localversion  CONFIG_LOCALVERSION for this target, e.g. -v8-16k
+set -euo pipefail
+
+die() {
+  echo "build: $*" >&2
+  exit 1
+}
+
+if [ "$#" -ne 4 ]; then
+  echo "usage: $0 <defconfig> <image-name> <out-dir> <localversion>" >&2
+  exit 2
+fi
+defconfig=$1
+image_name=$2
+out_arg=$3
+localversion=$4
+
+repo_root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$repo_root"
+out_dir=$(realpath -m "$out_arg")
+
+# shellcheck source=../kernel/pins.env
+. "$repo_root/kernel/pins.env"
+
+command -v aarch64-linux-gnu-gcc >/dev/null || die "aarch64-linux-gnu-gcc not found"
+
+# One source checkout per pinned SHA, shared by all targets.
+src_dir="$repo_root/build/src"
+head=""
+if [ -d "$src_dir/.git" ]; then
+  head=$(git -C "$src_dir" rev-parse -q --verify HEAD 2>/dev/null || true)
+fi
+if [ "$head" != "$RPI_KERNEL_SHA" ]; then
+  rm -rf "$src_dir"
+  mkdir -p "$src_dir"
+  git -C "$src_dir" init -q
+  git -C "$src_dir" remote add origin "$RPI_KERNEL_REPO"
+  git -C "$src_dir" fetch -q --depth=1 origin "$RPI_KERNEL_SHA"
+  git -C "$src_dir" checkout -q FETCH_HEAD
+fi
+cd "$src_dir"
+
+# LOCALVERSION= (set, but empty) stops setlocalversion appending "+" to the
+# release string; CONFIG_LOCALVERSION supplies the target suffix instead.
+kmake() {
+  make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION= O="$out_dir" "$@"
+}
+
+kmake "$defconfig"
+scripts/config --file "$out_dir/.config" --set-str LOCALVERSION "$localversion"
+scripts/kconfig/merge_config.sh -O "$out_dir" -m "$out_dir/.config" \
+  "$repo_root/kernel/config/landlock.config"
+kmake olddefconfig
+
+config="$out_dir/.config"
+require_line() {
+  grep -qxF "$1" "$config" || die "$config does not contain: $1"
+}
+require_line "CONFIG_SECURITY_LANDLOCK=y"
+require_line "CONFIG_SECURITY_APPARMOR=y"
+require_line "CONFIG_LOCALVERSION=\"$localversion\""
+
+# The config baseline diff (T06) must run here, after olddefconfig and before
+# the build, so that it describes the .config that is shipped.
+
+kmake -j"$(nproc)" Image modules dtbs
+cp "$out_dir/arch/arm64/boot/Image" "$out_dir/$image_name"
+
+release=$(kmake -s kernelrelease)
+staging="$out_dir/modules-staging"
+rm -rf "$staging"
+kmake INSTALL_MOD_PATH="$staging" modules_install
+tar -C "$staging/lib/modules/$release" --sort=name --owner=0 --group=0 --numeric-owner \
+  -czf "$out_dir/modules.tar.gz" .
+
+echo "build: $image_name and modules.tar.gz (kernel $release) written to $out_dir"

@@ -1,0 +1,4 @@
+agent_reference/*
+docs/*
+build/
+*.log
