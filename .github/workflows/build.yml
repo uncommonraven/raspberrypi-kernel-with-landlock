@@ -1,0 +1,78 @@
+# Reusable build. release.yml calls it so the kernel is compiled once, from the
+# tagged commit. Each matrix entry is one target; add new targets as entries.
+name: build
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    # The host only runs the container; the compiler comes from the image.
+    runs-on: ubuntu-latest
+    # Debian trixie provides GCC 14.2, matching Raspberry Pi's baseline.
+    container:
+      image: debian:trixie
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: bcm2712
+            defconfig: bcm2712_defconfig
+            image_name: kernel_2712.img
+            localversion: -v8-16k-landlock
+    env:
+      CCACHE_DIR: ${{ runner.temp }}/ccache
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential crossbuild-essential-arm64 ccache bc bison flex \
+            libssl-dev libelf-dev dwarves binutils kmod curl ca-certificates git
+
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Point the cross compiler at ccache
+        run: |
+          mkdir -p "$RUNNER_TEMP/ccache-bin"
+          ln -sf "$(command -v ccache)" "$RUNNER_TEMP/ccache-bin/aarch64-linux-gnu-gcc"
+          echo "$RUNNER_TEMP/ccache-bin" >> "$GITHUB_PATH"
+
+      - name: Restore ccache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ matrix.target }}-
+
+      - name: Build, check config diff, and stage release files
+        run: |
+          scripts/build.sh "${{ matrix.defconfig }}" "${{ matrix.image_name }}" \
+            "build/${{ matrix.target }}" "${{ matrix.localversion }}"
+
+      - name: Lay out and verify release files
+        run: |
+          scripts/collect-release.sh dist \
+            "${{ matrix.target }}=build/${{ matrix.target }}/release"
+
+      - name: ccache statistics
+        if: always()
+        run: ccache --show-stats
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/
+          if-no-files-found: error
