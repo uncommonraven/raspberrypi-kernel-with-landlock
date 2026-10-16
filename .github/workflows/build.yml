@@ -76,3 +76,4 @@ jobs:
           name: release-${{ matrix.target }}
           path: dist/${{ matrix.target }}/
           if-no-files-found: error
+          include-hidden-files: true
