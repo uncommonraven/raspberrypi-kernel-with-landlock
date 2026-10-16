@@ -27,7 +27,7 @@ jobs:
             image_name: kernel_2712.img
             localversion: -v8-16k-landlock
     env:
-      CCACHE_DIR: ${{ runner.temp }}/ccache
+      CCACHE_DIR: /tmp/ccache
       DEBIAN_FRONTEND: noninteractive
     steps:
       - name: Install build dependencies
