@@ -1,0 +1,120 @@
+# Release a tagged build. The kernel is compiled once, by build.yml, in this same
+# run. This job only checks, attests, and stages a draft release: it has no
+# compiler and no signing key. The owner signs manifest.json and publishes the
+# draft by hand (see D9).
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+
+  release:
+    name: draft release
+    needs: build
+    # Only tag refs get past this line, so a branch run never reaches attestation.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The environment holds no secrets. Its required reviewers approve each run,
+    # and its rules restrict it to release tags.
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Download build artifacts from this run
+        uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: release-*
+          path: artifacts
+
+      - name: Check the tag against the kernel version
+        run: |
+          tag=$GITHUB_REF_NAME
+          [[ $tag =~ ^v([0-9]+(\.[0-9]+)*)-landlock-[1-9][0-9]*$ ]] \
+            || { echo "tag must be v<kernel-version>-landlock-<revision>: $tag" >&2; exit 1; }
+          kver=${BASH_REMATCH[1]}
+          shopt -s nullglob
+          manifests=(artifacts/release-*/manifest.json)
+          shopt -u nullglob
+          [ "${#manifests[@]}" -gt 0 ] || { echo "no manifest.json in the build artifacts" >&2; exit 1; }
+          for manifest in "${manifests[@]}"; do
+            vermagic=$(sed -n 's/^  "vermagic": "\([^"]*\)",$/\1/p' "$manifest")
+            release=${vermagic%% *}
+            case $release in
+              "$kver"-*) echo "$manifest: kernel $release matches tag $tag" ;;
+              *) echo "$manifest: kernel '$release' does not match tag $tag (expected $kver-*)" >&2; exit 1 ;;
+            esac
+          done
+
+      - name: Lay out and verify release files
+        run: |
+          args=()
+          for dir in artifacts/release-*; do
+            args+=("${dir#artifacts/release-}=$dir")
+          done
+          scripts/collect-release.sh dist "${args[@]}"
+
+      - name: Package each target as one archive
+        run: |
+          for dir in dist/*/; do
+            target=${dir#dist/}
+            target=${target%/}
+            tar -C dist --sort=name --owner=0 --group=0 --numeric-owner -cf - "$target" \
+              | gzip -n > "dist/$target-$GITHUB_REF_NAME.tar.gz"
+          done
+
+      - name: Build the source tarball from the pinned commit
+        run: |
+          . kernel/pins.env
+          src_dir=$RUNNER_TEMP/kernel-src
+          git init -q "$src_dir"
+          git -C "$src_dir" remote add origin "$RPI_KERNEL_REPO"
+          git -C "$src_dir" fetch -q --depth=1 origin "$RPI_KERNEL_SHA"
+          git -C "$src_dir" checkout -q FETCH_HEAD
+          [ "$(git -C "$src_dir" rev-parse HEAD)" = "$RPI_KERNEL_SHA" ] \
+            || { echo "fetched commit is not $RPI_KERNEL_SHA" >&2; exit 1; }
+          prefix=raspberrypi-linux-$RPI_KERNEL_TAG
+          git -C "$src_dir" archive --format=tar --prefix="$prefix/" HEAD \
+            | gzip -n > "dist/$prefix.tar.gz"
+
+      - name: List attestation subjects and release assets
+        id: files
+        run: |
+          {
+            echo 'subjects<<EOF'
+            find dist -type f | sort
+            echo 'EOF'
+            echo 'assets<<EOF'
+            find dist -maxdepth 1 -type f | sort
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest release files
+        uses: actions/attest-build-provenance@v4.2.2
+        with:
+          subject-path: ${{ steps.files.outputs.subjects }}
+
+      - name: Create draft release
+        env:
+          ASSETS: ${{ steps.files.outputs.assets }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mapfile -t assets <<< "$ASSETS"
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag "${assets[@]}"
