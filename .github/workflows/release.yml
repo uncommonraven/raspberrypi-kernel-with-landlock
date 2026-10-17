@@ -37,11 +37,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download build artifacts from this run
+      # One step per target. Each artifact is named explicitly and written to
+      # artifacts/<target>/, so the layout does not depend on how many artifacts
+      # match. Add a step when a target is added (T14).
+      - name: Download bcm2712 release files from this run
         uses: actions/download-artifact@v8.0.2
         with:
-          pattern: release-*
-          path: artifacts
+          name: release-bcm2712
+          path: artifacts/bcm2712
 
       - name: Check the tag against the kernel version
         run: |
@@ -50,7 +53,7 @@ jobs:
             || { echo "tag must be v<kernel-version>-landlock-<revision>: $tag" >&2; exit 1; }
           kver=${BASH_REMATCH[1]}
           shopt -s nullglob
-          manifests=(artifacts/release-*/manifest.json)
+          manifests=(artifacts/*/manifest.json)
           shopt -u nullglob
           [ "${#manifests[@]}" -gt 0 ] || { echo "no manifest.json in the build artifacts" >&2; exit 1; }
           for manifest in "${manifests[@]}"; do
@@ -65,8 +68,9 @@ jobs:
       - name: Lay out and verify release files
         run: |
           args=()
-          for dir in artifacts/release-*; do
-            args+=("${dir#artifacts/release-}=$dir")
+          for dir in artifacts/*/; do
+            dir=${dir%/}
+            args+=("${dir#artifacts/}=$dir")
           done
           scripts/collect-release.sh dist "${args[@]}"
 
