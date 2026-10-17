@@ -297,7 +297,7 @@ The script:
 A full build can take a while depending on your device.
 
 ## AI usage disclosure
-This project was developed with the help of Claude Haiku 5.5, [a large language model from Anthropic](https://docs.claude.com/en/docs/about-claude/models/overview). The model helped write and revise the scripts, GitHub Actions workflows, documentation and this README. The maintainer directed the work, reviewed the changes, and tested the kernel's functionality on a Raspberry Pi 5 device.
+This project was developed with the help of Claude Haiku 5.5, [a large language model from Anthropic](https://docs.claude.com/en/docs/about-claude/models/overview). The model helped write and revise the scripts, GitHub Actions workflows, documentation, and this README. The maintainer directed the work, reviewed the changes, and tested the kernel's functionality on a Raspberry Pi 5 device.
 
 ## Licence
 
