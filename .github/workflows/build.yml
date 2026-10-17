@@ -26,6 +26,10 @@ jobs:
             defconfig: bcm2712_defconfig
             image_name: kernel_2712.img
             localversion: -v8-16k-landlock
+          - target: bcm2711
+            defconfig: bcm2711_defconfig
+            image_name: kernel8.img
+            localversion: -v8-landlock
     env:
       CCACHE_DIR: /tmp/ccache
       DEBIAN_FRONTEND: noninteractive

@@ -33,6 +33,10 @@ case $defconfig in
     baseline_package=linux-image-rpi-2712
     devices=("Raspberry Pi 5" "Raspberry Pi 500" "Raspberry Pi 500+" "Compute Module 5")
     ;;
+  bcm2711_defconfig)
+    baseline_package=linux-image-rpi-v8
+    devices=("Raspberry Pi 3" "Raspberry Pi 3+" "Compute Module 3" "Compute Module 3+" "Raspberry Pi Zero 2 W" "Raspberry Pi 4" "Raspberry Pi 400" "Compute Module 4" "Compute Module 4S" "Raspberry Pi 5" "Raspberry Pi 500" "Raspberry Pi 500+" "Compute Module 5")
+    ;;
   *) die "no config baseline package for $defconfig" ;;
 esac
 

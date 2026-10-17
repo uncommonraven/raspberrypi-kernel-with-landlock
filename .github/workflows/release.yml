@@ -46,6 +46,12 @@ jobs:
           name: release-bcm2712
           path: artifacts/bcm2712
 
+      - name: Download bcm2711 release files from this run
+        uses: actions/download-artifact@v8.0.2
+        with:
+          name: release-bcm2711
+          path: artifacts/bcm2711
+
       - name: Check the tag against the kernel version
         run: |
           tag=$GITHUB_REF_NAME
