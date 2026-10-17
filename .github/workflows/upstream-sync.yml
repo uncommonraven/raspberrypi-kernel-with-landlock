@@ -1,0 +1,184 @@
+# Weekly check for a newer stable_YYYYMMDD tag in raspberrypi/linux. When one
+# exists, open or refresh a PR that moves kernel/pins.env to it. Merging the PR
+# does not build: the owner reviews it, then tags a release, and the tag runs
+# the one build (see release.yml and the handoff, section 4 "Upstream sync").
+name: upstream-sync
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: sync pin to newest stable tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      BRANCH: upstream-sync/stable
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Find the newest stable tag and its commit
+        id: latest
+        run: |
+          die() {
+            echo "upstream-sync: $*" >&2
+            exit 1
+          }
+
+          . kernel/pins.env
+          tags=$(git ls-remote --tags "$RPI_KERNEL_REPO")
+          new_tag=$(printf '%s\n' "$tags" \
+            | sed -n 's#.*refs/tags/\(stable_[0-9]\{8\}\)$#\1#p' | sort | tail -n 1)
+          [ -n "$new_tag" ] || die "no stable_YYYYMMDD tag in $RPI_KERNEL_REPO"
+
+          # An annotated tag lists the tag object, then the commit it peels to (^{}).
+          new_sha=$(printf '%s\n' "$tags" | awk -v ref="refs/tags/$new_tag" '
+            $2 == (ref "^{}") { peeled = $1 }
+            $2 == ref { direct = $1 }
+            END { print (peeled ? peeled : direct) }')
+          [[ $new_sha =~ ^[0-9a-f]{40}$ ]] || die "could not resolve $new_tag to a commit SHA"
+
+          echo "pinned: $RPI_KERNEL_TAG $RPI_KERNEL_SHA"
+          echo "newest: $new_tag $new_sha"
+
+          changed=true
+          if [ "$new_tag" = "$RPI_KERNEL_TAG" ]; then
+            [ "$new_sha" = "$RPI_KERNEL_SHA" ] \
+              || die "$new_tag now points to $new_sha, but the pin is $RPI_KERNEL_SHA; a published tag must not move"
+            changed=false
+            echo "kernel/pins.env is up to date"
+          elif [[ $new_tag < $RPI_KERNEL_TAG ]]; then
+            changed=false
+            echo "newest tag $new_tag is older than the pin $RPI_KERNEL_TAG; leaving the pin alone"
+          fi
+
+          {
+            echo "changed=$changed"
+            echo "old_tag=$RPI_KERNEL_TAG"
+            echo "old_sha=$RPI_KERNEL_SHA"
+            echo "new_tag=$new_tag"
+            echo "new_sha=$new_sha"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read the kernel version at the new commit
+        id: kver
+        if: steps.latest.outputs.changed == 'true'
+        env:
+          NEW_SHA: ${{ steps.latest.outputs.new_sha }}
+        run: |
+          . kernel/pins.env
+          src_dir=$RUNNER_TEMP/kernel-src
+          git init -q "$src_dir"
+          git -C "$src_dir" remote add origin "$RPI_KERNEL_REPO"
+          git -C "$src_dir" fetch -q --depth=1 --filter=blob:none origin "$NEW_SHA"
+
+          kver=$(git -C "$src_dir" show FETCH_HEAD:Makefile | awk -F' *= *' '
+            $1 == "VERSION" { v = $2 }
+            $1 == "PATCHLEVEL" { p = $2 }
+            $1 == "SUBLEVEL" { s = $2 }
+            END { printf "%s.%s.%s", v, p, s }')
+          [[ $kver =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "unexpected kernel version: $kver" >&2; exit 1; }
+
+          echo "kernel_version=$kver" >> "$GITHUB_OUTPUT"
+
+      - name: Check that the baseline packages exist for the new release
+        id: baseline
+        if: steps.latest.outputs.changed == 'true'
+        env:
+          KVER: ${{ steps.kver.outputs.kernel_version }}
+        run: |
+          # A missing baseline makes the build fail at tag time, so warn here
+          # rather than failing the sync. The PR body carries the result.
+          report=$RUNNER_TEMP/baseline-report.md
+          : > "$report"
+          failed=0
+          for pair in bcm2712:linux-image-rpi-2712 bcm2711:linux-image-rpi-v8; do
+            target=${pair%%:*}
+            package=${pair#*:}
+            if scripts/fetch-baseline.sh "$package" "$KVER" "$RUNNER_TEMP/baseline/$target"; then
+              echo "- \`$target\`: \`$package\` $KVER is available and passes the sanity checks" >> "$report"
+            else
+              failed=1
+              echo "- \`$target\`: \`$package\` $KVER **failed**; see the job log" >> "$report"
+            fi
+          done
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+
+      - name: Update the pin and open or refresh the pull request
+        if: steps.latest.outputs.changed == 'true'
+        env:
+          OLD_TAG: ${{ steps.latest.outputs.old_tag }}
+          OLD_SHA: ${{ steps.latest.outputs.old_sha }}
+          NEW_TAG: ${{ steps.latest.outputs.new_tag }}
+          NEW_SHA: ${{ steps.latest.outputs.new_sha }}
+          KVER: ${{ steps.kver.outputs.kernel_version }}
+          BASELINE_FAILED: ${{ steps.baseline.outputs.failed }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Lets git push over HTTPS with GH_TOKEN, without storing the token in the checkout.
+          gh auth setup-git
+
+          # The branch is reset on every run, so a stale branch never survives.
+          git checkout -q -B "$BRANCH"
+          sed -i \
+            -e "s/^RPI_KERNEL_TAG=.*/RPI_KERNEL_TAG=$NEW_TAG/" \
+            -e "s/^RPI_KERNEL_SHA=.*/RPI_KERNEL_SHA=$NEW_SHA/" \
+            kernel/pins.env
+          git add kernel/pins.env
+          git commit -q -m "Pin raspberrypi/linux to $NEW_TAG"
+          git push -q --force origin "HEAD:refs/heads/$BRANCH"
+
+          if [ "$BASELINE_FAILED" = 1 ]; then
+            warning='> **Warning:** the baseline check failed for at least one target. The build for that target will fail at tag time until its baseline package exists for this kernel version. Do not tag a release from this pin until this is resolved.'
+          else
+            warning='The baseline check passed for every target.'
+          fi
+
+          cat > "$RUNNER_TEMP/pr-body.md" <<EOF
+          Moves the pinned Raspberry Pi kernel source from \`$OLD_TAG\` to \`$NEW_TAG\`.
+
+          | | Tag | Commit |
+          |---|---|---|
+          | Old | \`$OLD_TAG\` | \`$OLD_SHA\` |
+          | New | \`$NEW_TAG\` | \`$NEW_SHA\` |
+
+          Kernel version at the new commit (Makefile): \`$KVER\`
+
+          Baseline packages (\`scripts/fetch-baseline.sh\`):
+
+          $(cat "$RUNNER_TEMP/baseline-report.md")
+
+          $warning
+
+          Merging this PR does not build anything. Review the version bump, then tag a release. The tag starts the one build.
+
+          Note: a PR opened with the default \`GITHUB_TOKEN\` does not trigger other workflows, so no checks run on this PR.
+          EOF
+
+          title="Pin raspberrypi/linux to $NEW_TAG"
+          existing=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --title "$title" --body-file "$RUNNER_TEMP/pr-body.md"
+          else
+            gh pr create --base "$DEFAULT_BRANCH" --head "$BRANCH" \
+              --title "$title" --body-file "$RUNNER_TEMP/pr-body.md"
+          fi
